@@ -1,0 +1,96 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function own(uid) { return signedIn() && request.auth.uid == uid; }
+    function role() { return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data.rol; }
+    function validLocation(point) {
+      return point is map && point.keys().hasOnly(['latitude', 'longitude'])
+        && point.latitude is number && point.longitude is number
+        && point.latitude >= -90 && point.latitude <= 90
+        && point.longitude >= -180 && point.longitude <= 180;
+    }
+    function validAssignment(data) {
+      return data.descartados is list && (
+        (data.estado == 'sin_candidatos' && data.ofrecidoA == null
+          && data.participantes == [data.uid] && data.distanciaKm == null && data.ofrecidoEn == null)
+        || (data.estado == 'ofrecido' && data.ofrecidoA is string && data.ofrecidoA != data.uid
+          && !(data.ofrecidoA in data.descartados)
+          && data.participantes == [data.uid, data.ofrecidoA]
+          && data.distanciaKm is number && data.distanciaKm >= 0
+          && data.ofrecidoEn == request.time
+          && getAfter(/databases/$(database)/documents/recicladores/$(data.ofrecidoA)).data.disponible == true
+          && validLocation(getAfter(/databases/$(database)/documents/recicladores/$(data.ofrecidoA)).data.ubicacion))
+      );
+    }
+    match /materiales/{materialId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /usuarios/{uid} {
+      allow get: if own(uid);
+      allow list: if false;
+      allow create: if own(uid) && request.resource.data.keys().hasOnly(['id', 'nombre', 'correo', 'acreditado', 'rol'])
+        && request.resource.data.id == uid && request.resource.data.nombre is string
+        && request.resource.data.correo == request.auth.token.email
+        && request.resource.data.acreditado == false
+        && request.resource.data.rol in ['Empresa', 'Reciclador', 'Universidad'];
+      allow update: if own(uid) && resource.data.rol == 'Reciclador'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ubicacion', 'disponible'])
+        && validLocation(request.resource.data.ubicacion) && request.resource.data.disponible is bool;
+      allow delete: if false;
+    }
+    // Minimal directory: no emails, names or private profile fields.
+    match /recicladores/{uid} {
+      allow get: if own(uid) || (signedIn() && role() in ['Empresa', 'Reciclador']);
+      allow list: if signedIn() && role() in ['Empresa', 'Reciclador'];
+      allow create, update: if own(uid)
+        && getAfter(/databases/$(database)/documents/usuarios/$(uid)).data.rol == 'Reciclador'
+        && request.resource.data.keys().hasAll(['ubicacion', 'disponible', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['ubicacion', 'disponible', 'updatedAt'])
+        && validLocation(request.resource.data.ubicacion) && request.resource.data.disponible is bool
+        && request.resource.data.ubicacion == getAfter(/databases/$(database)/documents/usuarios/$(uid)).data.ubicacion
+        && request.resource.data.disponible == getAfter(/databases/$(database)/documents/usuarios/$(uid)).data.disponible
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if own(uid);
+    }
+    match /posts/{postId} {
+      allow get, list: if signedIn() && request.auth.uid in resource.data.participantes;
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid && role() == 'Empresa'
+        && request.resource.data.keys().hasOnly(['uid', 'author', 'materialId', 'material', 'categoriaId', 'codigoResina',
+          'precioMinKg', 'precioMaxKg', 'condicionPrecio', 'quantity', 'address', 'content', 'ubicacion',
+          'descartados', 'estado', 'ofrecidoA', 'participantes', 'distanciaKm', 'ofrecidoEn', 'createdAt'])
+        && request.resource.data.quantity is number && request.resource.data.quantity > 0
+        && request.resource.data.address is string && request.resource.data.address.size() > 0
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.descartados == []
+        && request.resource.data.materialId is string
+        && get(/databases/$(database)/documents/materiales/$(request.resource.data.materialId)).data.activo == true
+        && get(/databases/$(database)/documents/materiales/$(request.resource.data.materialId)).data.publicable == true
+        && validLocation(request.resource.data.ubicacion) && validAssignment(request.resource.data);
+      allow update: if signedIn() && (
+        (request.auth.uid == resource.data.uid && role() == 'Empresa'
+          && resource.data.estado in ['buscando', 'sin_candidatos']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'ofrecidoA', 'participantes', 'distanciaKm', 'ofrecidoEn'])
+          && validAssignment(request.resource.data))
+        || (request.auth.uid == resource.data.uid && role() == 'Empresa'
+          && resource.data.estado == 'apartado' && resource.data.apartadoPara is string
+          && request.resource.data.estado == 'recolectado'
+          && request.resource.data.recolectadoPor == request.auth.uid
+          && request.resource.data.recolectadoEn == request.time
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'recolectadoPor', 'recolectadoEn']))
+        || (request.auth.uid == resource.data.ofrecidoA && role() == 'Reciclador' && resource.data.estado == 'ofrecido'
+          && (
+            (request.resource.data.estado == 'apartado'
+              && request.resource.data.apartadoPara == request.auth.uid
+              && request.resource.data.apartadoEn == request.time
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'apartadoPara', 'apartadoEn']))
+            || (request.resource.data.descartados == resource.data.descartados.concat([request.auth.uid])
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado', 'ofrecidoA', 'participantes', 'distanciaKm', 'ofrecidoEn', 'descartados'])
+              && validAssignment(request.resource.data))
+          ))
+      );
+      allow delete: if false;
+    }
+  }
+}

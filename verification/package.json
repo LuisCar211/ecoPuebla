@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "firebase": "12.19.0",
+    "firebase-tools": "14.11.2",
+    "react": "19.2.3",
+    "react-test-renderer": "19.2.3",
+    "typescript": "6.0.3"
+  }
+}
